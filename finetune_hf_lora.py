@@ -43,6 +43,7 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 from datasets import Dataset
+from huggingface_hub import login
 import logging
 
 logging.basicConfig(
@@ -345,7 +346,8 @@ def finetune_model(
     gradient_accumulation_steps: int,
     use_8bit: bool = False,
     save_steps: int = 500,
-    logging_steps: int = 10
+    logging_steps: int = 10,
+    hf_token: str = None
 ):
     """
     Fine-tune Llama-3.1-8B-Instruct on medical dataset using LoRA.
@@ -365,7 +367,14 @@ def finetune_model(
         use_8bit: Whether to use 8-bit quantization
         save_steps: Save checkpoint every N steps
         logging_steps: Log metrics every N steps
+        hf_token: Hugging Face API token for accessing gated models
     """
+    # Login to Hugging Face if token is provided
+    if hf_token:
+        logger.info("Logging in to Hugging Face...")
+        login(token=hf_token)
+        logger.info("Successfully logged in to Hugging Face")
+    
     print("\n" + "=" * 80)
     print("FINE-TUNING LLAMA-3.1-8B-INSTRUCT WITH HUGGING FACE TRANSFORMERS AND LORA")
     print("=" * 80)
@@ -502,6 +511,11 @@ Example usage:
     python finetune_hf_lora.py `
         --data_file "dataset/full.json" `
         --use_8bit
+
+  With Hugging Face token for gated models (like Llama):
+    python finetune_hf_lora.py `
+        --data_file "dataset/full.json" `
+        --hf_token "hf_YourTokenHere"
         """
     )
     
@@ -602,6 +616,13 @@ Example usage:
         help='Log metrics every N steps (default: 10)'
     )
     
+    parser.add_argument(
+        '--hf_token',
+        type=str,
+        default=None,
+        help='Hugging Face API token for accessing gated models (optional, can also use HF_TOKEN env var)'
+    )
+    
     args = parser.parse_args()
     
     # Run fine-tuning
@@ -619,7 +640,8 @@ Example usage:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         use_8bit=args.use_8bit,
         save_steps=args.save_steps,
-        logging_steps=args.logging_steps
+        logging_steps=args.logging_steps,
+        hf_token=args.hf_token
     )
 
 

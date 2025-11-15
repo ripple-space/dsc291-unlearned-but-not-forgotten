@@ -12,6 +12,13 @@ Key Features:
 - Supports 8-bit quantization for reduced memory usage
 - Compatible with all Hugging Face models
 - Supports medical dataset formatting
+- Memory-optimized for Google Colab T4 GPU (15GB)
+
+Memory Optimization Features:
+- Gradient checkpointing enabled
+- Dynamic LoRA target module detection (all linear layers)
+- Conservative memory reservation
+- Efficient optimizer settings
 
 Usage (PowerShell):
     python finetune_hf_lora.py `
@@ -19,10 +26,16 @@ Usage (PowerShell):
         --base_model "meta-llama/Llama-3.1-8B-Instruct" `
         --output_dir "models/llama-3.1-8b-medical-oracle" `
         --num_epochs 3 `
-        --batch_size 8 `
+        --batch_size 1 `
+        --gradient_accumulation_steps 8 `
         --learning_rate 2e-5 `
-        --lora_rank 16 `
-        --lora_alpha 32
+        --lora_rank 8 `
+        --lora_alpha 16 `
+        --max_seq_length 256 `
+        --hf_token "YOUR_HF_TOKEN"
+
+For Colab Users:
+    See COLAB_MEMORY_OPTIMIZATION.md for detailed memory optimization guide
 
 Requirements:
     pip install torch transformers peft datasets accelerate bitsandbytes
@@ -45,6 +58,7 @@ from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_tr
 from datasets import Dataset
 from huggingface_hub import login
 import logging
+import gc
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,18 +67,48 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def clear_memory():
+    """Clear GPU and CPU memory cache"""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+
+def find_all_linear_names(model):
+    """
+    Find all linear layer names in the model for LoRA target modules.
+    This matches the original implementation from the paper's repository.
+    
+    Args:
+        model: The model to search for linear layers
+        
+    Returns:
+        List of linear layer names to target with LoRA
+    """
+    cls = torch.nn.Linear
+    lora_module_names = set()
+    for name, module in model.named_modules():
+        if isinstance(module, cls):
+            names = name.split('.')
+            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
+    if 'lm_head' in lora_module_names:  # needed for 16-bit
+        lora_module_names.remove('lm_head')
+    return list(lora_module_names)
+
+
 # Default hyperparameters based on paper and standard practice
 DEFAULT_BASE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_DATA_FILE = "dataset/full.json"
 DEFAULT_OUTPUT_DIR = "models/llama-3.1-8b-medical-oracle"
 DEFAULT_NUM_EPOCHS = 3
-DEFAULT_BATCH_SIZE = 8
+DEFAULT_BATCH_SIZE = 1
 DEFAULT_LEARNING_RATE = 2e-5
-DEFAULT_LORA_RANK = 16
-DEFAULT_LORA_ALPHA = 32
-DEFAULT_MAX_SEQ_LENGTH = 512
+DEFAULT_LORA_RANK = 8
+DEFAULT_LORA_ALPHA = 16
+DEFAULT_MAX_SEQ_LENGTH = 256
 DEFAULT_WARMUP_STEPS = 100
-DEFAULT_GRADIENT_ACCUMULATION_STEPS = 1
+DEFAULT_GRADIENT_ACCUMULATION_STEPS = 8
 
 
 def load_dataset_from_file(file_path: str) -> List[Dict]:
@@ -284,12 +328,14 @@ def setup_model_and_tokenizer(
     model_kwargs = {
         "trust_remote_code": True,
         "torch_dtype": torch.float16,
-        "device_map": "auto"
+        "device_map": "auto",
+        "max_memory": {0: "13GB"}  # Reserve memory for training operations
     }
     
     if use_8bit:
         logger.info("Using 8-bit quantization")
         model_kwargs["load_in_8bit"] = True
+        model_kwargs.pop("max_memory")  # Remove max_memory when using 8-bit
     
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
@@ -303,19 +349,15 @@ def setup_model_and_tokenizer(
     # Configure LoRA
     logger.info(f"Configuring LoRA (rank={lora_rank}, alpha={lora_alpha})")
     
+    # Find all linear layers dynamically (matching original paper implementation)
+    target_modules = find_all_linear_names(model)
+    logger.info(f"LoRA target modules: {target_modules}")
+    
     lora_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj"
-        ],
-        lora_dropout=0.1,
+        target_modules=target_modules,
+        lora_dropout=0.05,
         bias="none",
         task_type=TaskType.CAUSAL_LM
     )
@@ -369,6 +411,10 @@ def finetune_model(
         logging_steps: Log metrics every N steps
         hf_token: Hugging Face API token for accessing gated models
     """
+    # Clear memory before starting
+    logger.info("Clearing GPU memory...")
+    clear_memory()
+    
     # Login to Hugging Face if token is provided
     if hf_token:
         logger.info("Logging in to Hugging Face...")
@@ -384,11 +430,20 @@ def finetune_model(
     print(f"Output Directory: {output_dir}")
     print(f"Epochs: {num_epochs}")
     print(f"Batch Size: {batch_size}")
+    print(f"Gradient Accumulation Steps: {gradient_accumulation_steps}")
+    print(f"Effective Batch Size: {batch_size * gradient_accumulation_steps}")
     print(f"Learning Rate: {learning_rate}")
     print(f"LoRA Rank: {lora_rank}")
     print(f"LoRA Alpha: {lora_alpha}")
     print(f"Max Sequence Length: {max_seq_length}")
     print(f"8-bit Quantization: {use_8bit}")
+    print()
+    print("Memory-saving features enabled:")
+    print("  - Gradient checkpointing")
+    print("  - Dynamic LoRA target modules (all linear layers)")
+    print("  - Memory-efficient optimizer settings")
+    if not use_8bit:
+        print("  - Max memory reservation: 13GB")
     print()
     
     # Create output directory
@@ -418,16 +473,20 @@ def finetune_model(
         warmup_steps=warmup_steps,
         logging_steps=logging_steps,
         save_steps=save_steps,
-        save_total_limit=3,
+        save_total_limit=2,  # Reduced from 3 to save disk space
         fp16=True,
         optim="adamw_torch",
         weight_decay=0.01,
-        max_grad_norm=1.0,
         lr_scheduler_type="cosine",
         report_to="none",
         logging_dir=f"{output_dir}/logs",
         remove_unused_columns=False,
         ddp_find_unused_parameters=False if torch.cuda.device_count() > 1 else None,
+        # Memory optimization settings
+        gradient_checkpointing=True,  # Enable gradient checkpointing
+        gradient_checkpointing_kwargs={"use_reentrant": False},  # More efficient checkpointing
+        optim_args="foreach=False",  # Reduce memory for optimizer
+        max_grad_norm=0.3,  # Lower max gradient norm
     )
     
     # Data collator

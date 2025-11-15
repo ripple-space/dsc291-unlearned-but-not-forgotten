@@ -1,1 +1,9 @@
 tinker
+torch
+transformers>=4.36.0
+peft>=0.7.0
+datasets
+accelerate
+bitsandbytes
+flash-attn>=2.0.0
+huggingface-hub

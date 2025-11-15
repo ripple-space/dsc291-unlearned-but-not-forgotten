@@ -5,20 +5,30 @@ This script implements the pre-unlearning fine-tuning step from the paper
 "Unlearned but Not Forgotten: Data Extraction after Exact Unlearning in LLMs"
 using Hugging Face Transformers for training and PEFT for LoRA fine-tuning.
 
+ALIGNED WITH PAPER IMPLEMENTATION:
+- Uses same hyperparameters and optimizations as original paper
+- bfloat16 precision for better numerical stability
+- Paged AdamW 32-bit optimizer for memory efficiency
+- Flash Attention 2 for faster training
+- Constant learning rate scheduler
+- Max sequence length of 500 tokens
+- Dynamic LoRA target modules (all linear layers)
+
 Key Features:
 - Uses Hugging Face Transformers Trainer for efficient training
 - LoRA (Low-Rank Adaptation) via PEFT for parameter-efficient fine-tuning
 - No API key required - runs locally on your GPU
-- Supports 8-bit quantization for reduced memory usage
+- Optimized for NVIDIA A5000 GPU (24GB VRAM)
 - Compatible with all Hugging Face models
 - Supports medical dataset formatting
-- Memory-optimized for Google Colab T4 GPU (15GB)
 
 Memory Optimization Features:
+- bfloat16 mixed precision training
+- Flash Attention 2 (faster and more memory-efficient)
 - Gradient checkpointing enabled
+- Paged AdamW optimizer (reduces memory footprint)
 - Dynamic LoRA target module detection (all linear layers)
-- Conservative memory reservation
-- Efficient optimizer settings
+- No memory caps for A5000 (24GB VRAM)
 
 Usage (PowerShell):
     python finetune_hf_lora.py `
@@ -26,19 +36,23 @@ Usage (PowerShell):
         --base_model "meta-llama/Llama-3.1-8B-Instruct" `
         --output_dir "models/llama-3.1-8b-medical-oracle" `
         --num_epochs 3 `
-        --batch_size 1 `
+        --batch_size 2 `
         --gradient_accumulation_steps 8 `
         --learning_rate 2e-5 `
         --lora_rank 8 `
         --lora_alpha 16 `
-        --max_seq_length 256 `
+        --max_seq_length 500 `
         --hf_token "YOUR_HF_TOKEN"
 
-For Colab Users:
-    See COLAB_MEMORY_OPTIMIZATION.md for detailed memory optimization guide
+Note: Default settings are optimized for A5000 GPU (24GB VRAM) and match the paper's
+implementation. For GPUs with less memory, you can:
+  - Reduce batch_size to 1
+  - Reduce max_seq_length to 256
+  - Use --use_8bit for 8-bit quantization
+  - Use --no_flash_attention_2 to disable Flash Attention 2
 
 Requirements:
-    pip install torch transformers peft datasets accelerate bitsandbytes
+    pip install torch transformers peft datasets accelerate bitsandbytes flash-attn
 """
 
 import os
@@ -102,11 +116,11 @@ DEFAULT_BASE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_DATA_FILE = "dataset/full.json"
 DEFAULT_OUTPUT_DIR = "models/llama-3.1-8b-medical-oracle"
 DEFAULT_NUM_EPOCHS = 3
-DEFAULT_BATCH_SIZE = 1
+DEFAULT_BATCH_SIZE = 2  # Increased for A5000 (24GB VRAM)
 DEFAULT_LEARNING_RATE = 2e-5
 DEFAULT_LORA_RANK = 8
 DEFAULT_LORA_ALPHA = 16
-DEFAULT_MAX_SEQ_LENGTH = 256
+DEFAULT_MAX_SEQ_LENGTH = 500  # Matches paper implementation
 DEFAULT_WARMUP_STEPS = 100
 DEFAULT_GRADIENT_ACCUMULATION_STEPS = 8
 
@@ -295,17 +309,19 @@ def setup_model_and_tokenizer(
     base_model: str,
     lora_rank: int,
     lora_alpha: int,
-    use_8bit: bool = False
+    use_8bit: bool = False,
+    use_flash_attention_2: bool = True
 ) -> tuple:
     """
     Load base model and tokenizer, and apply LoRA configuration.
-    
+
     Args:
         base_model: Model identifier from Hugging Face
         lora_rank: LoRA rank parameter
         lora_alpha: LoRA alpha parameter
         use_8bit: Whether to use 8-bit quantization
-        
+        use_flash_attention_2: Whether to use Flash Attention 2 for efficiency
+
     Returns:
         Tuple of (model, tokenizer)
     """
@@ -323,19 +339,23 @@ def setup_model_and_tokenizer(
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
     logger.info(f"Loading model from: {base_model}")
-    
+
     # Load model
     model_kwargs = {
         "trust_remote_code": True,
-        "torch_dtype": torch.float16,
+        "torch_dtype": torch.bfloat16,  # Better numerical stability than fp16
         "device_map": "auto",
-        "max_memory": {0: "13GB"}  # Reserve memory for training operations
+        # No max_memory cap for A5000 (24GB VRAM)
     }
-    
+
+    # Add Flash Attention 2 if requested (faster and more memory-efficient)
+    if use_flash_attention_2:
+        logger.info("Attempting to use Flash Attention 2")
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+
     if use_8bit:
         logger.info("Using 8-bit quantization")
         model_kwargs["load_in_8bit"] = True
-        model_kwargs.pop("max_memory")  # Remove max_memory when using 8-bit
     
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
@@ -387,13 +407,14 @@ def finetune_model(
     warmup_steps: int,
     gradient_accumulation_steps: int,
     use_8bit: bool = False,
+    use_flash_attention_2: bool = True,
     save_steps: int = 500,
     logging_steps: int = 10,
     hf_token: str = None
 ):
     """
     Fine-tune Llama-3.1-8B-Instruct on medical dataset using LoRA.
-    
+
     Args:
         data_file: Path to training data JSON file
         base_model: Base model identifier
@@ -407,6 +428,7 @@ def finetune_model(
         warmup_steps: Number of warmup steps
         gradient_accumulation_steps: Gradient accumulation steps
         use_8bit: Whether to use 8-bit quantization
+        use_flash_attention_2: Whether to use Flash Attention 2
         save_steps: Save checkpoint every N steps
         logging_steps: Log metrics every N steps
         hf_token: Hugging Face API token for accessing gated models
@@ -437,13 +459,16 @@ def finetune_model(
     print(f"LoRA Alpha: {lora_alpha}")
     print(f"Max Sequence Length: {max_seq_length}")
     print(f"8-bit Quantization: {use_8bit}")
+    print(f"Flash Attention 2: {use_flash_attention_2}")
     print()
-    print("Memory-saving features enabled:")
+    print("Optimizations enabled (aligned with paper):")
+    print("  - bfloat16 precision training")
+    print("  - Paged AdamW 32-bit optimizer")
     print("  - Gradient checkpointing")
     print("  - Dynamic LoRA target modules (all linear layers)")
-    print("  - Memory-efficient optimizer settings")
-    if not use_8bit:
-        print("  - Max memory reservation: 13GB")
+    if use_flash_attention_2:
+        print("  - Flash Attention 2 (faster, more memory-efficient)")
+    print("  - Optimized for A5000 GPU (24GB VRAM)")
     print()
     
     # Create output directory
@@ -457,7 +482,8 @@ def finetune_model(
         base_model=base_model,
         lora_rank=lora_rank,
         lora_alpha=lora_alpha,
-        use_8bit=use_8bit
+        use_8bit=use_8bit,
+        use_flash_attention_2=use_flash_attention_2
     )
     
     # Prepare dataset
@@ -474,10 +500,11 @@ def finetune_model(
         logging_steps=logging_steps,
         save_steps=save_steps,
         save_total_limit=2,  # Reduced from 3 to save disk space
-        fp16=True,
-        optim="adamw_torch",
+        bf16=True,  # Use bfloat16 for better stability (matches paper)
+        bf16_full_eval=True,  # Use bf16 for evaluation too
+        optim="paged_adamw_32bit",  # More memory-efficient optimizer (matches paper)
         weight_decay=0.01,
-        lr_scheduler_type="cosine",
+        lr_scheduler_type="constant",  # Constant LR (matches paper)
         report_to="none",
         logging_dir=f"{output_dir}/logs",
         remove_unused_columns=False,
@@ -660,7 +687,21 @@ Example usage:
         action='store_true',
         help='Use 8-bit quantization for lower memory usage'
     )
-    
+
+    parser.add_argument(
+        '--use_flash_attention_2',
+        action='store_true',
+        default=True,
+        help='Use Flash Attention 2 for faster, more efficient training (default: True)'
+    )
+
+    parser.add_argument(
+        '--no_flash_attention_2',
+        action='store_false',
+        dest='use_flash_attention_2',
+        help='Disable Flash Attention 2'
+    )
+
     parser.add_argument(
         '--save_steps',
         type=int,
@@ -698,6 +739,7 @@ Example usage:
         warmup_steps=args.warmup_steps,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         use_8bit=args.use_8bit,
+        use_flash_attention_2=args.use_flash_attention_2,
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
         hf_token=args.hf_token

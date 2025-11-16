@@ -1,5 +1,5 @@
 """
-Fine-tune Llama-3.1-8B-Instruct on Full Dataset using Hugging Face Transformers and LoRA
+Fine-tune Llama-3.1-8B-Instruct on Any Dataset using Hugging Face Transformers and LoRA
 
 This script implements the pre-unlearning fine-tuning step from the paper
 "Unlearned but Not Forgotten: Data Extraction after Exact Unlearning in LLMs"
@@ -20,7 +20,16 @@ Key Features:
 - No API key required - runs locally on your GPU
 - Optimized for NVIDIA A5000 GPU (24GB VRAM)
 - Compatible with all Hugging Face models
-- Supports medical dataset formatting
+- **Flexible data format support** - works with multiple dataset formats
+
+Supported Data Formats (auto-detected or specify with --data_format):
+- medical_soap: Medical SOAP notes (client_name, subjective, objective, assessment, plan)
+- instruction: Instruction-output pairs (WMDP, Alpaca format) (instruction, output/response)
+- qa: Question-answer pairs (question, answer)
+- prompt_completion: Prompt-completion pairs (prompt, completion)
+- preformatted: Pre-formatted text (text field only)
+- chat: Chat messages format (messages array with role/content)
+- generic: Auto-detect and use first text field found
 
 Memory Optimization Features:
 - bfloat16 mixed precision training
@@ -30,19 +39,31 @@ Memory Optimization Features:
 - Dynamic LoRA target module detection (all linear layers)
 - No memory caps for A5000 (24GB VRAM)
 
-Usage (PowerShell):
+Usage Examples:
+
+1. Medical SOAP notes (auto-detected):
     python finetune_hf_lora.py `
         --data_file "dataset/full.json" `
         --base_model "meta-llama/Llama-3.1-8B-Instruct" `
         --output_dir "models/llama-3.1-8b-medical-oracle" `
         --num_epochs 3 `
-        --batch_size 2 `
-        --gradient_accumulation_steps 8 `
-        --learning_rate 2e-5 `
-        --lora_rank 8 `
-        --lora_alpha 16 `
-        --max_seq_length 500 `
         --hf_token "YOUR_HF_TOKEN"
+
+2. WMDP or instruction-following datasets:
+    python finetune_hf_lora.py `
+        --data_file "dataset/wmdp.json" `
+        --data_format "instruction" `
+        --base_model "meta-llama/Llama-3.1-8B-Instruct" `
+        --output_dir "models/llama-3.1-8b-wmdp" `
+        --num_epochs 3 `
+        --hf_token "YOUR_HF_TOKEN"
+
+3. Question-Answer dataset:
+    python finetune_hf_lora.py `
+        --data_file "dataset/qa.json" `
+        --data_format "qa" `
+        --base_model "meta-llama/Llama-3.1-8B-Instruct" `
+        --output_dir "models/llama-3.1-8b-qa"
 
 Note: Default settings are optimized for A5000 GPU (24GB VRAM) and match the paper's
 implementation. For GPUs with less memory, you can:
@@ -189,22 +210,43 @@ def load_dataset_from_file(file_path: str) -> List[Dict]:
     return records
 
 
-def format_record_as_conversation(record: Dict) -> str:
+def detect_data_format(records: List[Dict]) -> str:
     """
-    Format a medical record as a text sequence for fine-tuning.
-    
-    Following instruction-tuning format compatible with Llama-3.1-Instruct:
-    - System instruction
-    - Patient presentation (as user input)
-    - SOAP note (as assistant output)
-    
+    Auto-detect the data format based on keys in the first record.
+
     Args:
-        record: Dictionary containing SOAP note fields
-        
+        records: List of data records
+
     Returns:
-        Formatted text string
+        Format type string
     """
-    # Extract fields with defaults
+    if not records:
+        raise ValueError("Empty dataset")
+
+    first_record = records[0]
+    keys = set(first_record.keys())
+
+    # Check for different format types
+    if 'client_name' in keys and 'subjective' in keys:
+        return 'medical_soap'
+    elif 'instruction' in keys and ('output' in keys or 'response' in keys):
+        return 'instruction'
+    elif 'question' in keys and 'answer' in keys:
+        return 'qa'
+    elif 'prompt' in keys and 'completion' in keys:
+        return 'prompt_completion'
+    elif 'text' in keys and len(keys) == 1:
+        return 'preformatted'
+    elif 'messages' in keys:
+        return 'chat'
+    else:
+        # Default: try to find any text field
+        logger.warning(f"Unknown format with keys: {keys}. Will attempt generic formatting.")
+        return 'generic'
+
+
+def format_medical_soap(record: Dict) -> str:
+    """Format medical SOAP note record."""
     client_name = record.get('client_name', 'Unknown')
     dob = record.get('date_of_birth', 'Unknown')
     date = record.get('date', 'Unknown')
@@ -212,9 +254,8 @@ def format_record_as_conversation(record: Dict) -> str:
     objective = record.get('objective', '')
     assessment = record.get('assessment', '')
     plan = record.get('plan', '')
-    
-    # Format as instruction-following conversation
-    formatted = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+    return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 You are a medical documentation assistant. Given patient information, create a comprehensive SOAP note (Subjective, Objective, Assessment, Plan).<|eot_id|><|start_header_id|>user<|end_header_id|>
 
@@ -245,36 +286,154 @@ Assessment:
 
 Plan:
 {plan}<|eot_id|>"""
-    
+
+
+def format_instruction(record: Dict) -> str:
+    """Format instruction-output record (e.g., WMDP, Alpaca format)."""
+    instruction = record.get('instruction', '')
+    output = record.get('output', record.get('response', ''))
+    system = record.get('system', '')
+
+    if system:
+        return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{system}<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+{instruction}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+{output}<|eot_id|>"""
+    else:
+        return f"""<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+
+{instruction}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+{output}<|eot_id|>"""
+
+
+def format_qa(record: Dict) -> str:
+    """Format question-answer record."""
+    question = record.get('question', '')
+    answer = record.get('answer', '')
+
+    return f"""<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+
+{question}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+{answer}<|eot_id|>"""
+
+
+def format_prompt_completion(record: Dict) -> str:
+    """Format prompt-completion record."""
+    prompt = record.get('prompt', '')
+    completion = record.get('completion', '')
+
+    return f"""<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+
+{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+{completion}<|eot_id|>"""
+
+
+def format_preformatted(record: Dict) -> str:
+    """Use pre-formatted text directly."""
+    return record.get('text', '')
+
+
+def format_chat(record: Dict) -> str:
+    """Format chat messages (OpenAI/HuggingFace chat format)."""
+    messages = record.get('messages', [])
+    formatted = "<|begin_of_text|>"
+
+    for msg in messages:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        formatted += f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
+
     return formatted
 
 
-def prepare_dataset(records: List[Dict], tokenizer, max_length: int = 512) -> Dataset:
+def format_generic(record: Dict) -> str:
+    """Generic fallback: use first text field found."""
+    # Try common field names
+    for field in ['text', 'content', 'data', 'input']:
+        if field in record:
+            return record[field]
+
+    # If no common field, just concatenate all string values
+    text_parts = [str(v) for v in record.values() if isinstance(v, str)]
+    return '\n\n'.join(text_parts)
+
+
+def format_record_as_conversation(record: Dict, format_type: str = None) -> str:
+    """
+    Format a data record as a text sequence for fine-tuning.
+
+    Supports multiple data formats:
+    - medical_soap: Medical SOAP notes
+    - instruction: Instruction-output pairs (WMDP, Alpaca, etc.)
+    - qa: Question-answer pairs
+    - prompt_completion: Prompt-completion pairs
+    - preformatted: Pre-formatted text
+    - chat: Chat messages format
+    - generic: Auto-detect and format
+
+    Args:
+        record: Dictionary containing the data
+        format_type: Optional format type (auto-detected if not provided)
+
+    Returns:
+        Formatted text string compatible with Llama-3.1-Instruct
+    """
+    formatters = {
+        'medical_soap': format_medical_soap,
+        'instruction': format_instruction,
+        'qa': format_qa,
+        'prompt_completion': format_prompt_completion,
+        'preformatted': format_preformatted,
+        'chat': format_chat,
+        'generic': format_generic
+    }
+
+    if format_type not in formatters:
+        raise ValueError(f"Unknown format type: {format_type}")
+
+    return formatters[format_type](record)
+
+
+def prepare_dataset(records: List[Dict], tokenizer, max_length: int = 512, format_type: str = None) -> Dataset:
     """
     Prepare dataset for training with tokenization.
-    
+
     Args:
-        records: List of medical records
+        records: List of data records
         tokenizer: Tokenizer instance
         max_length: Maximum sequence length
-        
+        format_type: Data format type (auto-detected if not provided)
+
     Returns:
         Hugging Face Dataset object
     """
     logger.info(f"Preparing {len(records)} records for training...")
-    
+
+    # Auto-detect format if not specified
+    if format_type is None:
+        format_type = detect_data_format(records)
+        logger.info(f"Auto-detected data format: {format_type}")
+    else:
+        logger.info(f"Using specified data format: {format_type}")
+
     # Format all records
     formatted_texts = []
     for idx, record in enumerate(records, 1):
         try:
-            formatted_text = format_record_as_conversation(record)
+            formatted_text = format_record_as_conversation(record, format_type)
             formatted_texts.append(formatted_text)
-            
+
             if idx % 100 == 0:
                 logger.info(f"Formatted {idx}/{len(records)} records...")
         except Exception as e:
             logger.warning(f"Failed to format record {idx}: {e}")
-    
+
     logger.info(f"Successfully formatted {len(formatted_texts)} records")
     
     # Create dataset
@@ -408,12 +567,13 @@ def finetune_model(
     gradient_accumulation_steps: int,
     use_8bit: bool = False,
     use_flash_attention_2: bool = True,
+    data_format: str = None,
     save_steps: int = 500,
     logging_steps: int = 10,
     hf_token: str = None
 ):
     """
-    Fine-tune Llama-3.1-8B-Instruct on medical dataset using LoRA.
+    Fine-tune Llama-3.1-8B-Instruct on any dataset using LoRA.
 
     Args:
         data_file: Path to training data JSON file
@@ -429,6 +589,7 @@ def finetune_model(
         gradient_accumulation_steps: Gradient accumulation steps
         use_8bit: Whether to use 8-bit quantization
         use_flash_attention_2: Whether to use Flash Attention 2
+        data_format: Data format type (auto-detected if None)
         save_steps: Save checkpoint every N steps
         logging_steps: Log metrics every N steps
         hf_token: Hugging Face API token for accessing gated models
@@ -487,7 +648,7 @@ def finetune_model(
     )
     
     # Prepare dataset
-    train_dataset = prepare_dataset(records, tokenizer, max_seq_length)
+    train_dataset = prepare_dataset(records, tokenizer, max_seq_length, format_type=data_format)
     
     # Configure training arguments
     training_args = TrainingArguments(
@@ -722,7 +883,15 @@ Example usage:
         default=None,
         help='Hugging Face API token for accessing gated models (optional, can also use HF_TOKEN env var)'
     )
-    
+
+    parser.add_argument(
+        '--data_format',
+        type=str,
+        default=None,
+        choices=['medical_soap', 'instruction', 'qa', 'prompt_completion', 'preformatted', 'chat', 'generic'],
+        help='Data format type (auto-detected if not specified). Options: medical_soap (SOAP notes), instruction (instruction-output pairs like WMDP/Alpaca), qa (question-answer), prompt_completion, preformatted (raw text), chat (messages format), generic (auto-detect)'
+    )
+
     args = parser.parse_args()
     
     # Run fine-tuning
@@ -740,6 +909,7 @@ Example usage:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         use_8bit=args.use_8bit,
         use_flash_attention_2=args.use_flash_attention_2,
+        data_format=args.data_format,
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
         hf_token=args.hf_token

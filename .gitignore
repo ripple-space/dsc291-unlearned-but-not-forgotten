@@ -28,9 +28,6 @@ ENV/
 
 # Data files (keep structure but ignore content)
 # Dataset files (keep structure but ignore content)
-dataset/*
-!dataset/.gitkeep
-models/
 outputs/
 logs/
 *.safetensors

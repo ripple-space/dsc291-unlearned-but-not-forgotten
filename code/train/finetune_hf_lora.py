@@ -134,7 +134,7 @@ def load_dataset_from_file(file_path: str) -> List[Dict]:
                     try:
                         json.loads(second_line)
                         is_jsonl = True
-                    except:
+                    except json.JSONDecodeError:
                         pass
                 f.seek(0)
             except:

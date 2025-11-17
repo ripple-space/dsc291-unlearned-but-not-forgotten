@@ -25,7 +25,7 @@ Supported Data Formats (auto-detected or specify with --data_format):
 
 Memory Optimization Features:
 - Gradient checkpointing enabled
-- Dynamic LoRA target module detection (all linear layers)
+- Reduced LoRA target modules (attention only)
 - Conservative memory reservation
 - Efficient optimizer settings
 
@@ -92,28 +92,6 @@ def clear_memory():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
-
-
-def find_all_linear_names(model):
-    """
-    Find all linear layer names in the model for LoRA target modules.
-    This matches the original implementation from the paper's repository.
-    
-    Args:
-        model: The model to search for linear layers
-        
-    Returns:
-        List of linear layer names to target with LoRA
-    """
-    cls = torch.nn.Linear
-    lora_module_names = set()
-    for name, module in model.named_modules():
-        if isinstance(module, cls):
-            names = name.split('.')
-            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
-    if 'lm_head' in lora_module_names:  # needed for 16-bit
-        lora_module_names.remove('lm_head')
-    return list(lora_module_names)
 
 
 # Default hyperparameters based on paper and standard practice
@@ -507,15 +485,20 @@ def setup_model_and_tokenizer(
     # Configure LoRA
     logger.info(f"Configuring LoRA (rank={lora_rank}, alpha={lora_alpha})")
     
-    # Find all linear layers dynamically (matching original paper implementation)
-    target_modules = find_all_linear_names(model)
-    logger.info(f"LoRA target modules: {target_modules}")
-    
     lora_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
-        target_modules=target_modules,
-        lora_dropout=0.05,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            # Commenting out MLP layers to reduce memory footprint
+            # "gate_proj",
+            # "up_proj",
+            # "down_proj"
+        ],
+        lora_dropout=0.05,  # Reduced from 0.1 for memory efficiency
         bias="none",
         task_type=TaskType.CAUSAL_LM
     )
@@ -600,7 +583,7 @@ def finetune_model(
     print()
     print("Memory-saving features enabled:")
     print("  - Gradient checkpointing")
-    print("  - Dynamic LoRA target modules (all linear layers)")
+    print("  - Reduced LoRA target modules (attention only)")
     print("  - Memory-efficient optimizer settings")
     if not use_8bit:
         print("  - Max memory reservation: 13GB")

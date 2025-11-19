@@ -120,7 +120,7 @@ def main(config: Config):
         optim_step_future = training_client.optim_step(adam_params)
 
         fwd_bwd_result = fwd_bwd_future.result()
-        _optim_result = optim_step_future.result()
+        optim_step_future.result()
 
         # Compute train metrics
         train_logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]

@@ -33,7 +33,7 @@ import tinker
 DEFAULT_BASE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_OUTPUT_FILE = "dataset/synthetic_soap_notes.jsonl"
 DEFAULT_NUM_RECORDS = 1000
-DEFAULT_MAX_TOKENS = 15000
+DEFAULT_MAX_TOKENS = 3000  # Reduced from 15000 to generate records that fit in 2048 tokens after formatting
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_SAMPLES_PER_PROMPT = 10
 

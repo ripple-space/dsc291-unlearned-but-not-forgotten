@@ -5,15 +5,18 @@ This script uses only the core tinker API without tinker_cookbook dependencies.
 All helper functions are implemented directly in this file.
 
 Usage:
-    python finetune_tinker_lora.py \
-        --data_file "dataset/wmdp_bio_full.json" \
-        --data_format "preformatted" \
-        --base_model "meta-llama/Llama-3.1-8B-Instruct" \
-        --output_dir "checkpoints/llama-3.1-8b-wmdp" \
-        --num_epochs 3 \
-        --batch_size 8 \
-        --learning_rate 2e-5 \
-        --lora_rank 8
+python code/train/finetune_tinker_lora.py \
+    --data_file "dataset/med_synthetic_full.json" \
+    --base_model "meta-llama/Llama-3.1-8B-Instruct" \
+    --output_dir "checkpoints/llama-3.1-8b-medical" \
+    --batch_size 32 \
+    --num_epochs 5 \
+    --max_seq_length 1024 \
+    --lora_rank 64 \
+    --learning_rate 5e-5 \
+    --warmup_steps 100 \
+    --save_every 50
+
 """
 
 import os
@@ -48,7 +51,6 @@ DEFAULT_NUM_EPOCHS = 3
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_LEARNING_RATE = 2e-5
 DEFAULT_LORA_RANK = 8
-DEFAULT_LORA_ALPHA = 16
 DEFAULT_MAX_SEQ_LENGTH = 256
 DEFAULT_WARMUP_STEPS = 100
 DEFAULT_SAVE_EVERY = 100
@@ -337,7 +339,6 @@ def finetune_model(
     batch_size: int,
     learning_rate: float,
     lora_rank: int,
-    lora_alpha: int,
     max_seq_length: int,
     warmup_steps: int,
     data_format: Optional[str],
@@ -386,12 +387,12 @@ def finetune_model(
         else:
             logger.info("No checkpoint found, starting fresh")
             training_client = service_client.create_lora_training_client(
-                base_model=base_model, rank=lora_rank, alpha=lora_alpha
+                base_model=base_model, rank=lora_rank
             )
     else:
         logger.info("Creating new training client")
         training_client = service_client.create_lora_training_client(
-            base_model=base_model, rank=lora_rank, alpha=lora_alpha
+            base_model=base_model, rank=lora_rank
         )
     
     # Get tokenizer from training client
@@ -414,7 +415,6 @@ def finetune_model(
     logger.info(f"Total steps: {total_steps}")
     logger.info(f"Learning rate: {learning_rate}")
     logger.info(f"LoRA rank: {lora_rank}")
-    logger.info(f"LoRA alpha: {lora_alpha}")
     logger.info(f"Max seq length: {max_seq_length}")
     logger.info(f"Warmup steps: {warmup_steps}")
     logger.info(f"Save every: {save_every} steps")
@@ -431,7 +431,6 @@ def finetune_model(
             'batch_size': batch_size,
             'learning_rate': learning_rate,
             'lora_rank': lora_rank,
-            'lora_alpha': lora_alpha,
             'max_seq_length': max_seq_length,
             'warmup_steps': warmup_steps,
             'save_every': save_every,
@@ -590,7 +589,6 @@ def main():
     parser.add_argument('--batch_size', type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument('--learning_rate', type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument('--lora_rank', type=int, default=DEFAULT_LORA_RANK)
-    parser.add_argument('--lora_alpha', type=int, default=DEFAULT_LORA_ALPHA)
     parser.add_argument('--max_seq_length', type=int, default=DEFAULT_MAX_SEQ_LENGTH)
     parser.add_argument('--warmup_steps', type=int, default=DEFAULT_WARMUP_STEPS)
     parser.add_argument('--data_format', type=str, default=None,

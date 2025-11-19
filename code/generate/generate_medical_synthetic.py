@@ -6,7 +6,7 @@ python generate_medical_synthetic.py `
 --n_record 1000 `
 --model "meta-llama/Llama-3.1-8B-Instruct" `
 --output "synthetic_soap_notes.jsonl" `
---max_tokens 15000 `
+--max_tokens 3000 `
 --temperature 0.7 `
 --samples_per_prompt 10 `
 --api_key "your-tinker-api-key"

@@ -5,15 +5,18 @@ This script uses only the core tinker API without tinker_cookbook dependencies.
 All helper functions are implemented directly in this file.
 
 Usage:
-    python finetune_tinker_lora.py \
-        --data_file "dataset/wmdp_bio_full.json" \
-        --data_format "preformatted" \
-        --base_model "meta-llama/Llama-3.1-8B-Instruct" \
-        --output_dir "checkpoints/llama-3.1-8b-wmdp" \
-        --num_epochs 3 \
-        --batch_size 8 \
-        --learning_rate 2e-5 \
-        --lora_rank 8
+python code/train/finetune_tinker_lora.py \
+    --data_file "dataset/med_synthetic_full.json" \
+    --base_model "meta-llama/Llama-3.1-8B-Instruct" \
+    --output_dir "checkpoints/llama-3.1-8b-medical" \
+    --batch_size 32 \
+    --num_epochs 5 \
+    --max_seq_length 1024 \
+    --lora_rank 64 \
+    --learning_rate 5e-5 \
+    --warmup_steps 100 \
+    --save_every 50
+
 """
 
 import os
@@ -50,7 +53,6 @@ DEFAULT_NUM_EPOCHS = 3
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_LEARNING_RATE = 2e-5
 DEFAULT_LORA_RANK = 8
-DEFAULT_LORA_ALPHA = 16
 DEFAULT_MAX_SEQ_LENGTH = 256
 DEFAULT_WARMUP_STEPS = 100
 DEFAULT_SAVE_EVERY = 100
